@@ -1,10 +1,20 @@
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
 import time
-import requests
 import random
+from datetime import datetime
 
+controllers = {}  # control_id -> Control instance
+
+levels_file = open("combined.txt", "w")
+file_lock = threading.Lock()  
+
+def stop_all_controllers():
+    print("Stopping all controllers...")
+    for ctrl in list(controllers.values()):
+        ctrl.stop()
+    controllers.clear()
 
 class Component:
     def __init__(self, name, featureTuple):
@@ -13,146 +23,155 @@ class Component:
         self.weight = 0.0
 
 class Control:
-    def __init__(self, id, masters, slaves, ip, port, components, tupleSize, mu):
+    def __init__(self, id, masters, slaves, components, tupleSize, mu):
         self.id = id
-        self.masters = masters
-        self.slaves = slaves
-        self.ip = ip
-        self.port = port
+        self.masters = masters  
+        self.slaves = slaves    
         self.components = components
         self.tupleSize = tupleSize
         self.mu = mu
+        self.slaveArchWeight = {}
+        self.componentWeightsMap = {c.name: [] for c in components}
+        self.execution_times = []  # store execution times for trials
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.update_thread = None
+        self.initiate_thread = None
+
+    def stop(self):
+        self.stop_event.set()
+        if self.update_thread:
+            self.update_thread.join()
+        if self.initiate_thread:
+            self.initiate_thread.join()
+
     def isInitiator(self):
         return not bool(self.slaves)
+
     def isEnder(self):
         return not bool(self.masters)
-    def __str__(self):
-        return f"{self.ip}:{self.port}"
 
-def run_control_server(id, port, isInitiator, isEnder, masters, slaves, tupleSize, components, mu):
-
-    class ControlServer(BaseHTTPRequestHandler):
-        count_slaves = 0
-        def log_message(self, format, *args):
-            return
-
-        def do_POST(self):
-            content_len = int(self.headers.get('content-length', 0))
-            post_body = self.rfile.read(content_len)
-            data = json.loads(post_body.decode('utf-8'))
-
-            slaveArchWeight[data['slaveID']] = (data['slaveArchitecture'], data['slaveWeight'], data['initiatorTimestamp'])
-
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-
-            ControlServer.count_slaves += 1
-            if ControlServer.count_slaves == len(slaves):
-                optimalArchitectureWeight = chooseOptimalArchitecture(data['initiatorTimestamp'])
-                if not isEnder:
-                    sendToAllMasters(optimalArchitectureWeight[0], optimalArchitectureWeight[1], data['initiatorTimestamp'])
+    # Receive message from a slave
+    def receive_from_slave(self, slaveID, slaveArchitecture, slaveWeight, initiatorTimestamp):
+        with self.lock:
+            self.slaveArchWeight[slaveID] = (slaveArchitecture, slaveWeight, initiatorTimestamp)
+            
+            if len(self.slaveArchWeight) == len(self.slaves):
+                optimalArchitectureWeight = self.chooseOptimalArchitecture(initiatorTimestamp)
+                if not self.isEnder():
+                    self.sendToAllMasters(optimalArchitectureWeight[0], optimalArchitectureWeight[1], initiatorTimestamp)
                 else:
-                    start_time = data['initiatorTimestamp']
-                    end_time = datetime.timestamp(datetime.now())
-                    execution_time = end_time - start_time
-                    # ذخیره زمان در فایل برای خواندن توسط Deployer
-                    with open("execution_times.txt", "a") as f:
-                        f.write(f"{execution_time}\n")
-                ControlServer.count_slaves = 0
+                    execution_time = (datetime.timestamp(datetime.now()) - initiatorTimestamp) * 1000   
+                    self.execution_times.append(execution_time)
+                    if len(self.execution_times) == 5:
+                        avg_time = sum(self.execution_times) / len(self.execution_times)
+                       
+                        with file_lock:
+                            levels_file.write(f"{len(list(controllers.values()))} ")
+                            levels_file.write(f"{len(controllers['O1'].components)} {avg_time:.3f}\n")
+                            levels_file.flush()
+                        self.stop()
+                        controllers.clear()                                                           
 
-    def updateWeights():
-        while True:
-            time.sleep(1)
-            envTuple = tuple(random.random() for _ in range(tupleSize))
-            for comp in components:
-                comp.weight = sum(envTuple[i] * comp.featureTuple[i] for i in range(tupleSize))
-                componentWeightsMap[comp.name].append((comp.weight, datetime.timestamp(datetime.now())))
+    # Compute optimal architecture
+    def chooseOptimalArchitecture(self, ts):
+        candidates = []
+        minWeight = float('inf')
 
-    def initiateAggregation():
-        time.sleep(1)
-        timestamp = datetime.timestamp(datetime.now())
-        # Initiator chooses component with minimum وزن
-        optimalArchitectureList = []
-        optimalWeight = float('inf')
-        for compName, compWeights in componentWeightsMap.items():
-            if not compWeights:
-                continue
-            if compWeights[-1][0] <= optimalWeight:
-                optimalWeight = compWeights[-1][0]
-                optimalArchitectureList = [compName]
+        for cname, weights in self.componentWeightsMap.items():
+            # choose weight closest to timestamp
+            chosenWeight = min(weights, key=lambda x: abs(x[1] - ts))[0]
+            aggregated = self.slaveArchWeight[self.mu[cname]][1] + chosenWeight
 
-# 🔴 اگر هنوز هیچ انتخابی نشده، aggregation را انجام نده
-        if optimalWeight == float('inf'):
-            return
-        sendToAllMasters(optimalArchitectureList, optimalWeight, timestamp)
+            if aggregated < minWeight:
+                minWeight = aggregated
+                candidates = [cname]
+            elif aggregated == minWeight:
+                candidates.append(cname)
 
-    def sendToAllMasters(optArchList, optWeight, initiatorTimestamp):
-        data = {
-            'slaveID': id,
-            'slaveArchitecture': optArchList,
-            'slaveWeight': optWeight,
-            'initiatorTimestamp': initiatorTimestamp
-        }
-        for masterID, masterIP in masters.items():
-            try:
-                requests.post(masterIP, json=data)
-            except Exception as e:
-                print(f"Error sending to master {masterID}: {e}")
+        # random tie-breaking if multiple components have the same minimal weight
+        optimalComponent = random.choice(candidates)
+        return (self.slaveArchWeight[self.mu[optimalComponent]][0] + [optimalComponent], minWeight)
 
-    def chooseOptimalArchitecture(initiatorTimestamp):
-        optimalComponent = ""
-        optimalWeight = float('inf')
-        for compName, compWeights in componentWeightsMap.items():
-            # انتخاب وزن نزدیک به timestamp
-            chosenTimestamp = float('inf')
-            for w, ts in compWeights:
-                delta = abs(ts - initiatorTimestamp)
-                if delta <= chosenTimestamp:
-                    chosenTimestamp = delta
-                    chosenWeight = w
-            aggregatedWeight = slaveArchWeight[mu[compName]][1] + chosenWeight if mu[compName] in slaveArchWeight else chosenWeight
-            if aggregatedWeight <= optimalWeight:
-                optimalWeight = aggregatedWeight
-                optimalComponent = compName
-        arch = slaveArchWeight[mu[optimalComponent]][0] + [optimalComponent] if mu[optimalComponent] in slaveArchWeight else [optimalComponent]
-        return (arch, optimalWeight)
+    # Send to masters directly via Python calls
+    def sendToAllMasters(self, optimalArchitectureList, optimalWeight, ts):
+        for masterID in self.masters.keys():
+            master = controllers.get(masterID)
+            if master:
+                master.receive_from_slave(
+                    slaveID=self.id,
+                    slaveArchitecture=optimalArchitectureList,
+                    slaveWeight=optimalWeight,
+                    initiatorTimestamp=ts
+                )
 
-    componentWeightsMap = {c.name: [] for c in components}
-    slaveArchWeight = {}
+    # Thread: Update weights periodically
+    def updateWeightsLoop(self):
+        while not self.stop_event.is_set():
+            time.sleep(2)
+            env = [random.uniform(0.0, 1.0) for _ in range(self.tupleSize)]
+            for c in self.components:
+                weight = sum(env[i] * c.featureTuple[i] for i in range(self.tupleSize))
+                c.weight = weight
+                self.componentWeightsMap[c.name].append((weight, datetime.timestamp(datetime.now())))
 
-    threading.Thread(target=updateWeights, daemon=True).start()
-    if isInitiator:
-        threading.Thread(target=initiateAggregation, daemon=True).start()
+    # Thread: If initiator, start aggregation
+    def initiateAggregationLoop(self):
 
-    server_address = ('', port)
-    ThreadingHTTPServer(server_address, ControlServer).serve_forever()
+        for i in range(0,5):
+            if self.stop_event.is_set():
+                break
+            ts = datetime.timestamp(datetime.now())
+            optimalList = [self.components[0].name]
+            optimalWeight = self.componentWeightsMap[self.components[0].name][0][0]
+            self.sendToAllMasters(optimalList, optimalWeight, ts)
 
+    # Start controller threads
+    def start(self):
+        env = [random.uniform(0.0, 1.0) for _ in range(self.tupleSize)]
+        for c in self.components:
+            weight = sum(env[i] * c.featureTuple[i] for i in range(self.tupleSize))
+            c.weight = weight
+            self.componentWeightsMap[c.name].append((weight, datetime.timestamp(datetime.now())))
+        self.update_thread = threading.Thread(target=self.updateWeightsLoop)
+        self.update_thread.start()
+        #threading.Thread(target=self.updateWeightsLoop, daemon=True).start() 
+        if self.isInitiator():
+            #threading.Thread(target=self.initiateAggregationLoop, daemon=True).start()
+            self.initiate_thread = threading.Thread(target=self.initiateAggregationLoop)
+            self.initiate_thread.start()
 
+# ControlManager receives JSON externally and creates local controllers
 class ControlManager(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        return
-
+        pass
+    
     def do_POST(self):
+        
         content_len = int(self.headers.get('content-length', 0))
-        post_body = self.rfile.read(content_len)
-        data = json.loads(post_body.decode('utf-8'))
+        data = json.loads(self.rfile.read(content_len).decode('utf-8'))
 
         for key, value in data.items():
             components = [Component(cid, ft) for cid, ft in value['components'].items()]
-            tupleSize = len(value['components'][list(value['components'].keys())[0]])
-            control = Control(key, value['masters'], value['slaves'], self.server.server_address[0], value['port'], components, tupleSize, value['mu'])
-            threading.Thread(target=run_control_server, args=(control.id, control.port, control.isInitiator(), control.isEnder(), control.masters, control.slaves, control.tupleSize, control.components, control.mu), daemon=True).start()
+            tupleSize = len(components[0].featureTuple)
+            control = Control(
+                key,
+                value['masters'],
+                value['slaves'],
+                components,
+                tupleSize,
+                value['mu']
+            )
+            controllers[key] = control
+            control.start()  # start threads for this controller
 
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
         self.end_headers()
 
-
 def run_manager_server(ip, port):
-    print(f"Control Manager Server listening on {ip}:{port}")
-    ThreadingHTTPServer((ip, port), ControlManager).serve_forever()
-
+    server = HTTPServer((ip, port), ControlManager)
+    print(f'Control Manager listening on {ip}:{port}')
+    server.serve_forever()
 
 if __name__ == "__main__":
-    run_manager_server("127.0.0.1", 8080)
+    run_manager_server('127.0.0.1', 8080)
