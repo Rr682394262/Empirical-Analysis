@@ -100,6 +100,7 @@ class Deployer:
             self.controlIPs[jointSetId] = self.controlManagers[counter].ip
             self.controlPorts[jointSetId] = self.controlManagers[counter].port+len(self.allocationIP[address])
             counter += 1
+            #print (jointSetId + "--->" + address)
 
     def deploy(self):
         for manager in self.controlManagers:
@@ -122,8 +123,7 @@ class Deployer:
                     self.initiatorManager = manager.ip + ":" + str(manager.port)
                     self.initiatorController = jointSetId
             try:            
-                response = requests.post(manager.ip + ":" + str(manager.port), json=data)            
-              
+                response = requests.post(manager.ip + ":" + str(manager.port), json=data)             
             except response.exception.requestException as e:
                 print(f"An error occured: {e}")  
 
@@ -142,13 +142,11 @@ class Deployer:
         data[self.initiatorController]['port'] = self.controlPorts[self.initiatorController]
         try:            
             response = requests.post(self.initiatorManager, json=data)          
-           
         except response.exception.requestException as e:
             print(f"An error occured: {e}")
             
 dynamic = {}
 
-######################################
 
 def experiments_combined():
     print ("Conducting experiments. Please wait.")
@@ -167,7 +165,7 @@ def experiments_combined():
             comp_list = comp_list + [head]
             js_list = js_list + [top_js]
 
-            for j in range(1, number_levels-1): 
+            for j in range(1, number_levels-1): # 5 joint sets (+ top joint set + bottom joint set)
                 components = []
                 for c in range(density): # 5 components
                     next_component = [Component("C"+str(len(comp_list)), (0.5,0.7))]
@@ -200,13 +198,12 @@ def experiments_combined():
 
             controlStructure = HierarchicalControl(generator, dynamic)
 
-           
             deployer = Deployer(controlStructure, [Host('http://127.0.0.1', 8080)])
             deployer.allocate()
             deployer.deploy()
             #time.sleep(4)
             deployer.execute()
-            time.sleep(0.5) 
+            time.sleep(0.5) # Delay to allow the manager to free resources
     print ("Experiments completed...")
 
 def experiments_density():
@@ -214,7 +211,7 @@ def experiments_density():
 
     levels = 70
     max_density = 140
-    for density in range(2,max_density+1,5):
+    for density in range(132,133,5):
         comp_list = []
         js_list = []
 
@@ -279,9 +276,9 @@ def experiments_levels():
         comp_list = comp_list + [head]
         js_list = js_list + [top_js]
 
-        for j in range(1, number_levels-1): # 5 joint sets (+ top joint set + bottom joint set)
+        for j in range(1, number_levels-1):
             components = []
-            for c in range(density): # 5 components
+            for c in range(density):
                 next_component = [Component("C"+str(len(comp_list)), (0.5,0.7))]
                 components = components + next_component
                 comp_list = comp_list + next_component        
@@ -307,7 +304,7 @@ def experiments_levels():
 
         for cId in range(1, len(comp_list)-1):    
             generator.addMappingToMu("C"+str(cId), "O"+str(js_counter)); 
-            if (cId % density == 0): js_counter += 1 # multiple of density
+            if (cId % density == 0): js_counter += 1 
         generator.addMappingToMu("C"+str(len(comp_list)-1), "")
 
         controlStructure = HierarchicalControl(generator, dynamic)
@@ -321,4 +318,62 @@ def experiments_levels():
         time.sleep(0.5) # Delay to allow the manager to free resources
     print ("Experiments completed...")
 
-experiments_combined()
+def experiments_vectors():
+    print ("Conducting experiments. Please wait.")
+
+    dimension = 20
+    density = 5
+    number_levels = 7
+    # for dimension in range(2,max_dimension+1):
+
+    comp_list = []
+    js_list = []
+    rnd_tuple = tuple(random.random() for _ in range(dimension))
+
+    head = Component("C0", rnd_tuple)
+    top_js = JointSet([head], "O0")
+    top_js.updateDynamicMap(dynamic)
+    comp_list = comp_list + [head]
+    js_list = js_list + [top_js]
+
+    for j in range(1, number_levels-1): 
+        components = []
+        for c in range(density): 
+            next_component = [Component("C"+str(len(comp_list)), rnd_tuple)]
+            components = components + next_component
+            comp_list = comp_list + next_component        
+        js = JointSet(components, "O"+str(len(js_list)))
+        js.updateDynamicMap(dynamic)
+        js_list = js_list + [js]
+
+
+    tail = Component("C"+str(len(comp_list)), rnd_tuple)
+    bottom_js = JointSet([tail], "O"+str(len(js_list)))
+    bottom_js.updateDynamicMap(dynamic)
+    comp_list = comp_list + [tail]
+    js_list = js_list + [bottom_js]
+
+    generator = ArchitectureGenerator()
+    for c in range(len(comp_list)):
+        generator.addComponent(comp_list[c])
+    for j in range(len(js_list)):
+        generator.addJointSet(js_list[j])
+
+    generator.addMappingToMu("C0", "O1")
+    js_counter = 2
+
+    for cId in range(1, len(comp_list)-1):    
+        generator.addMappingToMu("C"+str(cId), "O"+str(js_counter)); 
+        if (cId % density == 0): js_counter += 1 # multiple of density
+    generator.addMappingToMu("C"+str(len(comp_list)-1), "")
+
+    controlStructure = HierarchicalControl(generator, dynamic)
+
+    deployer = Deployer(controlStructure, [Host('http://127.0.0.1', 8080)])
+    deployer.allocate()
+    deployer.deploy()
+    deployer.execute()
+    time.sleep(0.5) # Delay to allow the manager to free resources
+    print ("Experiments completed...")
+
+experiments_levels()
