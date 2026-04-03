@@ -5,8 +5,10 @@ import time
 import random
 from datetime import datetime
 
+# global registry of controllers
 controllers = {}  # control_id -> Control instance
 
+# Open the file once for appending
 levels_file = open("combined.txt", "w")
 file_lock = threading.Lock()  
 
@@ -65,10 +67,11 @@ class Control:
                     self.execution_times.append(execution_time)
                     if len(self.execution_times) == 5:
                         avg_time = sum(self.execution_times) / len(self.execution_times)
+                        print(f"OPTIMAL ARCHITECTURE: {optimalArchitectureWeight[0]}")
+                        print(f"WEIGHT: {optimalArchitectureWeight[1]}")
                        
                         with file_lock:
-                            levels_file.write(f"{len(list(controllers.values()))} ")
-                            levels_file.write(f"{len(controllers['O1'].components)} {avg_time:.3f}\n")
+                            levels_file.write(f"{len(list(controllers.values()))} {avg_time:.3f}\n")
                             levels_file.flush()
                         self.stop()
                         controllers.clear()                                                           
@@ -89,11 +92,9 @@ class Control:
             elif aggregated == minWeight:
                 candidates.append(cname)
 
-        # random tie-breaking if multiple components have the same minimal weight
         optimalComponent = random.choice(candidates)
         return (self.slaveArchWeight[self.mu[optimalComponent]][0] + [optimalComponent], minWeight)
 
-    # Send to masters directly via Python calls
     def sendToAllMasters(self, optimalArchitectureList, optimalWeight, ts):
         for masterID in self.masters.keys():
             master = controllers.get(masterID)
@@ -122,6 +123,7 @@ class Control:
             if self.stop_event.is_set():
                 break
             ts = datetime.timestamp(datetime.now())
+            # simple: pick first component
             optimalList = [self.components[0].name]
             optimalWeight = self.componentWeightsMap[self.components[0].name][0][0]
             self.sendToAllMasters(optimalList, optimalWeight, ts)
@@ -135,13 +137,10 @@ class Control:
             self.componentWeightsMap[c.name].append((weight, datetime.timestamp(datetime.now())))
         self.update_thread = threading.Thread(target=self.updateWeightsLoop)
         self.update_thread.start()
-        #threading.Thread(target=self.updateWeightsLoop, daemon=True).start() 
         if self.isInitiator():
-            #threading.Thread(target=self.initiateAggregationLoop, daemon=True).start()
             self.initiate_thread = threading.Thread(target=self.initiateAggregationLoop)
             self.initiate_thread.start()
 
-# ControlManager receives JSON externally and creates local controllers
 class ControlManager(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
